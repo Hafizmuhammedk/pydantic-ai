@@ -542,23 +542,6 @@ Google, Bedrock, Groq, Mistral and the Hugging Face router accepted it, so on th
 
 KNOWN_FINDINGS = [
     KnownFinding(
-        'F1',
-        'call_ids_are_unique',
-        frozenset({'repeated_call_id'}),
-        'https://github.com/pydantic/pydantic-ai/issues/11120',
-        tuple(Pin(case_id, _REPEATED_CALL_ID, rejection) for case_id, rejection in REPEATED_CALL_ID_REJECTIONS.items()),
-    ),
-    KnownFinding(
-        'F1b',
-        'call_ids_are_unique',
-        frozenset({'repeated_call_id_across_responses'}),
-        'https://github.com/pydantic/pydantic-ai/issues/11120',
-        tuple(
-            Pin(case_id, _REPEATED_CALL_ID_ACROSS_RESPONSES, rejection)
-            for case_id, rejection in REPEATED_CALL_ID_ACROSS_RESPONSES_REJECTIONS.items()
-        ),
-    ),
-    KnownFinding(
         'F3',
         'text_is_not_empty',
         frozenset({'empty_system_prompt'}),
@@ -708,6 +691,24 @@ async def test_known_finding_is_still_present(finding: KnownFinding, pin: Pin):
     else:
         case = next(case for case in MAPPER_CASES if case.id == pin.case_id)
         assert await _violations(finding.fails, case, pin.history) == []
+
+
+@pytest.mark.parametrize(
+    'case,history',
+    [
+        pytest.param(case, history, id=f'{case.id}-{scope}', marks=case.marks)
+        for scope, history, rejections in [
+            ('response', _REPEATED_CALL_ID, REPEATED_CALL_ID_REJECTIONS),
+            ('history', _REPEATED_CALL_ID_ACROSS_RESPONSES, REPEATED_CALL_ID_ACROSS_RESPONSES_REJECTIONS),
+        ]
+        for case in MAPPER_CASES
+        if case.id in rejections
+    ],
+)
+async def test_repeated_tool_call_ids_are_canonicalized(case: MapperCase, history: list[ModelMessage]):
+    """The reproducers from #11120 now have distinct wire IDs and paired results."""
+    assert await _violations('call_ids_are_unique', case, history) == []
+    assert await _violations('results_answer_calls', case, history) == []
 
 
 # --- properties --------------------------------------------------------------------------------------
