@@ -12,10 +12,14 @@ from ..messages import (
     ModelRequest,
     ModelRequestPart,
     ModelResponsePart,
+    RetryPromptPart,  # pyright: ignore[reportDeprecated]
     ToolCallPart,
     ToolReturnPart,
 )
-from . import _hashed_tool_call_id  # pyright: ignore[reportPrivateUsage]
+from . import (
+    _hashed_tool_call_id,  # pyright: ignore[reportPrivateUsage]
+    _legacy_retry_as_sendable,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 def deduplicate_tool_call_ids(
@@ -35,6 +39,10 @@ def deduplicate_tool_call_ids(
         if isinstance(message, ModelRequest):
             request_parts: list[ModelRequestPart] = []
             for part in message.parts:
+                # Direct model calls render deprecated retries in the adapter, after this pass.
+                # Lower tool-bound retries first so they consume the matching call's FIFO ID.
+                if isinstance(part, RetryPromptPart) and part.tool_name is not None:  # pyright: ignore[reportDeprecated]
+                    part = _legacy_retry_as_sendable(part)
                 if isinstance(part, ToolReturnPart) and (ids := pending.get(part.tool_call_id)):
                     replacement = ids.popleft()
                     if replacement != part.tool_call_id:

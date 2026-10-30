@@ -26,8 +26,10 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import ModelRequestParameters
 
+from ..conftest import legacy_retry_prompt_part
 
-async def _mapped_messages(adapter: str, messages: list[ModelMessage]) -> JsonValue:
+
+async def _mapped_messages(adapter: str, messages: list[ModelMessage], *, prepare_messages: bool = True) -> JsonValue:
     """Exercise each mapper that the issue's API probes confirmed rejects repeated IDs."""
     params = ModelRequestParameters()
     if adapter == 'openai':
@@ -71,7 +73,9 @@ async def _mapped_messages(adapter: str, messages: list[ModelMessage]) -> JsonVa
 
         model = MistralModel('mistral-large-latest', provider=MistralProvider(api_key='test'))
         _, params = model.prepare_request(None, params)
-        mapped = await model._map_messages(model.prepare_messages(messages), params)  # pyright: ignore[reportPrivateUsage]
+        mapped = await model._map_messages(  # pyright: ignore[reportPrivateUsage]
+            model.prepare_messages(messages) if prepare_messages else messages, params
+        )
     else:
         assert adapter == 'cohere'
         pytest.importorskip('cohere')
@@ -151,6 +155,71 @@ async def test_unique_ids_keep_their_existing_wire_values(adapter: str) -> None:
     ]
     calls, results = _wire_ids(await _mapped_messages(adapter, messages))
     assert calls == results == ['aB3dE5gH9', 'bC4eF6hI0']
+
+
+@pytest.mark.parametrize('adapter', ['openai', 'anthropic', 'google', 'bedrock', 'mistral', 'cohere'])
+async def test_direct_mapping_pairs_legacy_retries_with_the_rewritten_call(adapter: str) -> None:
+    """A direct model call also accepts legacy retries, without `prepare_messages` lowering them first."""
+    messages: list[ModelMessage] = [
+        ModelResponse(
+            parts=[ToolCallPart('lookup', {'q': 'a'}, 'aB3dE5gH9'), ToolCallPart('lookup', {'q': 'b'}, 'aB3dE5gH9')]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart('lookup', 'a', 'aB3dE5gH9'),
+                legacy_retry_prompt_part('try again', tool_name='lookup', tool_call_id='aB3dE5gH9'),
+            ]
+        ),
+    ]
+    stored = ModelMessagesTypeAdapter.dump_json(messages)
+    calls, results = _wire_ids(await _mapped_messages(adapter, messages, prepare_messages=False))
+    assert len(set(calls)) == 2
+    assert results == calls
+    assert ModelMessagesTypeAdapter.dump_json(messages) == stored
+
+
+async def test_direct_mistral_request_pairs_a_legacy_retry(allow_model_requests: None) -> None:
+    pytest.importorskip('mistralai')
+    from pydantic_ai.models.mistral import MistralModel
+    from pydantic_ai.providers.mistral import MistralProvider
+
+    captured: list[JsonValue] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        captured.append(json.loads(request.content)['messages'])
+        return httpx2.Response(
+            200,
+            json={
+                'id': 'reply',
+                'created': 1,
+                'model': 'mistral-large-latest',
+                'object': 'chat.completion',
+                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'done'}, 'finish_reason': 'stop'}],
+                'usage': {'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2},
+            },
+        )
+
+    messages: list[ModelMessage] = [
+        ModelResponse(
+            parts=[ToolCallPart('lookup', {'q': 'a'}, 'aB3dE5gH9'), ToolCallPart('lookup', {'q': 'b'}, 'aB3dE5gH9')]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart('lookup', 'a', 'aB3dE5gH9'),
+                legacy_retry_prompt_part('try again', tool_name='lookup', tool_call_id='aB3dE5gH9'),
+            ]
+        ),
+    ]
+    stored = ModelMessagesTypeAdapter.dump_json(messages)
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(respond)) as client:
+        model = MistralModel('mistral-large-latest', provider=MistralProvider(api_key='test', http_client=client))
+        assert (await model.request(messages, None, ModelRequestParameters())).parts == [TextPart('done')]
+    assert len(captured) == 1
+    calls, results = _wire_ids(captured[0])
+    assert len(calls) == len(set(calls)) == 2
+    assert all(len(value) == 9 and value.isalnum() for value in calls)
+    assert results == calls
+    assert ModelMessagesTypeAdapter.dump_json(messages) == stored
 
 
 @pytest.mark.parametrize('mode', ['run', 'run_stream', 'request'])

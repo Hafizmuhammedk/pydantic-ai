@@ -21,6 +21,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import _hashed_tool_call_id  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.models._tool_call_ids import deduplicate_tool_call_ids
 
+from ..conftest import legacy_retry_prompt_part
+
 
 def _ids(messages: list[ModelMessage]) -> list[str]:
     return [
@@ -117,6 +119,26 @@ def test_valid_history_keeps_identity_and_orphan_results_are_not_repaired() -> N
     ]
     assert deduplicate_tool_call_ids(messages) is messages
     assert deduplicate_tool_call_ids(tuple(messages)) == messages
+
+
+def test_toolless_legacy_feedback_does_not_consume_a_call_id() -> None:
+    feedback = legacy_retry_prompt_part('response feedback', tool_call_id='same')
+    messages: list[ModelMessage] = [
+        ModelResponse(parts=[ToolCallPart('a', {}, 'same'), ToolCallPart('b', {}, 'same')]),
+        ModelRequest(
+            parts=[
+                feedback,
+                ToolReturnPart('a', 'A', 'same'),
+                legacy_retry_prompt_part('tool retry', tool_name='b', tool_call_id='same'),
+            ]
+        ),
+    ]
+    mapped = deduplicate_tool_call_ids(messages)
+    assert mapped[1].parts[0] is feedback
+    assert _ids(mapped)[:2] == _ids(mapped)[2:]
+    result = mapped[1].parts[2]
+    assert isinstance(result, ToolReturnPart)
+    assert result.outcome == 'retried'
 
 
 def test_later_response_reuse_shadows_an_unanswered_call() -> None:
