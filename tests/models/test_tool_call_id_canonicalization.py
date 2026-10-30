@@ -18,7 +18,10 @@ from pydantic_ai.messages import (
     ToolSearchCallPart,
     ToolSearchReturnPart,
 )
-from pydantic_ai.models import _hashed_tool_call_id  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai.models import (
+    _hashed_tool_call_id,  # pyright: ignore[reportPrivateUsage]
+    _tool_call_ids,
+)
 from pydantic_ai.models._tool_call_ids import deduplicate_tool_call_ids
 
 from ..conftest import legacy_retry_prompt_part
@@ -162,3 +165,27 @@ def test_exhausted_id_space_raises_instead_of_looping() -> None:
     messages: list[ModelMessage] = [ModelResponse(parts=[ToolCallPart('a', {}, 'x') for _ in range(63)])]
     with pytest.raises(UserError, match='Too many tool calls'):
         deduplicate_tool_call_ids(messages, id_length=1)
+
+
+@pytest.mark.parametrize('across_responses', [False, True])
+@pytest.mark.parametrize('count', [10, 20])
+def test_repeated_ids_require_linear_hash_work(
+    monkeypatch: pytest.MonkeyPatch, across_responses: bool, count: int
+) -> None:
+    hash_calls = 0
+
+    def counted_hash(value: str, length: int) -> str:
+        nonlocal hash_calls
+        hash_calls += 1
+        return _hashed_tool_call_id(value, length)
+
+    monkeypatch.setattr(_tool_call_ids, '_hashed_tool_call_id', counted_hash)
+    messages: list[ModelMessage] = [
+        ModelResponse(parts=[ToolCallPart('a', {}, 'same') for _ in range(count)]) for _ in range(2)
+    ]
+    mapped = deduplicate_tool_call_ids(messages, across_responses=across_responses)
+    assert hash_calls <= 2 * count
+    if across_responses:
+        assert len(set(_ids(mapped))) == 2 * count
+    else:
+        assert _ids(mapped[:1]) == _ids(mapped[1:])

@@ -32,6 +32,7 @@ def deduplicate_tool_call_ids(
     already-rendered prefix. Native tool IDs belong to the server and are left alone.
     """
     taken: set[str] = set()
+    attempts: dict[str, int] = {}
     pending: dict[str, deque[str]] = {}
     mapped: list[ModelMessage] = []
     changed = False
@@ -53,6 +54,7 @@ def deduplicate_tool_call_ids(
         else:
             if not across_responses:
                 taken.clear()
+                attempts.clear()
             response_ids: set[str] = set()
             response_parts: list[ModelResponsePart] = []
             for part in message.parts:
@@ -64,12 +66,13 @@ def deduplicate_tool_call_ids(
                         pending[original] = deque()
                         response_ids.add(original)
                     replacement = original
-                    attempt = 0
+                    attempt = attempts.get(original, 0)
                     while replacement in taken:
                         if len(taken) >= 62**id_length:
                             raise UserError('Too many tool calls to assign distinct IDs in the required format.')
                         attempt += 1
                         replacement = _hashed_tool_call_id(f'{original}#{attempt}', id_length)
+                    attempts[original] = attempt
                     taken.add(replacement)
                     pending[original].append(replacement)
                     if replacement != original:
